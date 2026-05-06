@@ -12,92 +12,93 @@ from webmax import WebMaxClient
 from webmax.entities import Message
 from notification_service import TelegramNotificationService
 from telegram_receiver import TelegramReceiver
+from webmax.errors import NeedRestartError
 
 load_dotenv()
 
 class FloodProtection:
 	"""Защита от флуда — отслеживание паттерна спама."""
-	
-	def __init__(self, max_messages_per_minute: int = 60, 
+
+	def __init__(self, max_messages_per_minute: int = 60,
 				 max_messages_per_hour: int = 500):
 		self.max_per_minute = max_messages_per_minute
 		self.max_per_hour = max_messages_per_hour
-		
+
 		# Очереди временных меток
 		self.minute_timestamps = deque(maxlen=max_messages_per_minute)
 		self.hour_timestamps = deque(maxlen=max_messages_per_hour)
-		
+
 		self._lock = asyncio.Lock()
-	
+
 	async def check_flood(self, chat_id: str) -> tuple[bool, str]:
 		"""
 		Проверить, не превышен ли лимит.
-		
+
 		Returns:
 			(is_flood, reason)
 		"""
 		async with self._lock:
 			now = time.time()
-			
+
 			# Удаляем старые временные метки (> 1 часа)
 			while self.hour_timestamps and (now - self.hour_timestamps[0]) > 3600:
 				self.hour_timestamps.popleft()
-			
+
 			# Удаляем старые временные метки (> 1 минуты)
 			while self.minute_timestamps and (now - self.minute_timestamps[0]) > 60:
 				self.minute_timestamps.popleft()
-			
+
 			# Проверяем лимиты
 			if len(self.minute_timestamps) >= self.max_per_minute:
 				return True, f"⚠️ Достигнут лимит {self.max_per_minute} сообщений/минуту"
-			
+
 			if len(self.hour_timestamps) >= self.max_per_hour:
 				return True, f"⚠️ Достигнут лимит {self.max_per_hour} сообщений/час"
-			
+
 			# Добавляем текущую метку времени
 			self.minute_timestamps.append(now)
 			self.hour_timestamps.append(now)
-			
+
 			return False, ""
 
 
 class MaxBot:
 	"""Обёртка для WebMaxClient с поддержкой вложений, таймаутов и защиты от флуда."""
-	
+
 	def __init__(self, session_name: str, phone: str, token: str = None, device_id: str = None,
-				group_chat_id: str = None, group_name: str = None,
-				telegram_bot_token: str = None, telegram_user_chat_id: str = None,
-				telegram_group_chat_id: str = None, telegram_proxy_url: str = None,
-				timeout: float = 30.0,
-				history_chat_id: int = None,		# ID чата для сбора истории (если не совпадает с group_chat_id)
-				history_limit: int = 20,		   # сколько последних сообщений получать при каждом запросе
-				history_file: str = "history.json",
-				max_target_chat_id: int = None,
-				telegram_to_max_enabled: bool = False,
-				telegram_names_map_file: str = None):
-		
+				 group_chat_id: str = None, group_name: str = None,
+				 telegram_bot_token: str = None, telegram_user_chat_id: str = None,
+				 telegram_group_chat_id: str = None, telegram_proxy_url: str = None,
+				 timeout: float = 30.0,
+				 history_chat_id: int = None,  # ID чата для сбора истории (если не совпадает с group_chat_id)
+				 history_limit: int = 20,  # сколько последних сообщений получать при каждом запросе
+				 history_file: str = "history.json",
+				 max_target_chat_id: int = None,
+				 telegram_to_max_enabled: bool = False,
+				 telegram_names_map_file: str = None):
+
 		self.client = WebMaxClient(session_name=session_name, phone=phone)
 		self.client.token = token
 		self.client.device_id = device_id or str(uuid.uuid4())
 
 		self._shutdown_event = asyncio.Event()
 		self._tasks = []
-		
+
 		self.group_chat_id = group_chat_id
 		self.group_name = group_name
-		
+
 		# Rate limiting и таймауты
 		self.flood_protection = FloodProtection()
 		self.timeout = timeout
-		
+
 		self.history_chat_id = history_chat_id or (int(group_chat_id) if group_chat_id else None)
 		self.history_limit = history_limit
 		self.history_file = history_file
-		self._history_task = None   # задача планировщика
-		
+		self._history_task = None  # задача планировщика
+
 		if telegram_bot_token:
 			self.notifier = TelegramNotificationService(
-				bot_token=telegram_bot_token, 
+				bot_token=telegram_bot_token,
 				proxy_url=telegram_proxy_url
 			)
 			self.telegram_user_chat_id = telegram_user_chat_id
@@ -127,7 +128,8 @@ class MaxBot:
 
 		self.setup_handlers()
 
-	async def _extract_attachments(self, message: Message) -> dict:
+	async def _extract_attachments(self, message: Message, override_chat_id: int = None,
+								   override_message_id: str = None) -> dict:
 		attachments = {
 			'photo_url': None,
 			'video_url': None,
@@ -135,6 +137,10 @@ class MaxBot:
 			'file_name': None,
 			'file_type': None
 		}
+
+		# Если переопределения заданы, используем их для обращения к API
+		api_chat_id = override_chat_id if override_chat_id is not None else message.chat_id
+		api_message_id = override_message_id if override_message_id is not None else message.id
 
 		if not message.attaches:
 			return attachments
@@ -154,7 +160,8 @@ class MaxBot:
 					token = attach.get('token')
 					if video_id and token:
 						try:
-							video_data = await self.client.play_video(video_id, token, message.chat_id, message.id)
+							# Используем api_chat_id и api_message_id
+							video_data = await self.client.play_video(video_id, token, api_chat_id, api_message_id)
 							quality_keys = ['MP4_1080', 'MP4_720', 'MP4_480', 'MP4_360']
 							video_url = None
 							for key in quality_keys:
@@ -173,8 +180,8 @@ class MaxBot:
 					name = attach.get('name', 'file')
 					if file_id and token:
 						try:
-							# Получаем ссылку на файл через API
-							file_url = await self.client.get_file_url(file_id, message.chat_id, message.id)
+							# Используем api_chat_id и api_message_id
+							file_url = await self.client.get_file_url(file_id, api_chat_id, api_message_id)
 							if file_url:
 								attachments['file_url'] = file_url
 								attachments['file_type'] = 'document'
@@ -191,18 +198,18 @@ class MaxBot:
 						attachments['file_name'] = attach.get('name', f"audio_{attach.get('audioId', 'unknown')}.mp3")
 
 		return attachments
-	
+
 	def setup_handlers(self):
 		"""Установить обработчики сообщений."""
-		
+
 		@self.client.on_start()
 		async def on_start():
 			print(f"✅ Авторизован как {self.client.me.firstname} {self.client.me.lastname}")
-		
+
 		@self.client.on_message()
 		async def handle_new_message(message: Message):
 			await self.process_message(message)
-				
+
 	async def process_message(self, message: Message):
 		"""Обработка одного сообщения (отправка в Telegram, логирование)"""
 		try:
@@ -225,14 +232,16 @@ class MaxBot:
 				original = message.link.forwarded_message
 				original_sender = await self.client.get_user_name(original.sender_id)
 				text = original.text or ""
-				attachments = await self._extract_attachments(original)
+				attachments = await self._extract_attachments(original, override_chat_id=message.chat_id,
+															  override_message_id=message.id)
 				prefix = f"[от {original_sender}]"
 			else:
 				text = message.text or ""
 				attachments = await self._extract_attachments(message)
 				prefix = ""
 
-			sender = message.sender.firstname if message.sender else await self.client.get_user_name(message.sender_id) if message.sender_id else "Unknown"
+			sender = message.sender.firstname if message.sender else await self.client.get_user_name(
+				message.sender_id) if message.sender_id else "Unknown"
 			formatted_message = f"🆕 [{timestamp}] {sender}"
 
 			if prefix:
@@ -251,8 +260,8 @@ class MaxBot:
 
 			# Отправляем в Telegram
 			if self.notifier:
-				is_group_message = (self.group_chat_id is not None and 
-								   str(message.chat_id) == self.group_chat_id)
+				is_group_message = (self.group_chat_id is not None and
+									str(message.chat_id) == self.group_chat_id)
 				target_chat = self.telegram_group_chat_id if is_group_message else self.telegram_user_chat_id
 				if not target_chat:
 					print("⚠️ Не задан Telegram chat ID")
@@ -346,7 +355,7 @@ class MaxBot:
 		except Exception as e:
 			print(f"❌ Ошибка отправки в Max: {e}")
 			return False
-	
+
 	async def _history_scheduler(self):
 		"""Планировщик: запускает получение истории в 11:00, 18:00, 20:00."""
 		if not self.history_chat_id:
@@ -373,7 +382,7 @@ class MaxBot:
 					next_run = (now + timedelta(days=1)).replace(hour=first[0], minute=first[1], second=0, microsecond=0)
 
 				wait_seconds = (next_run - now).total_seconds()
-				print(f"⏰ Следующая проверка истории в {next_run.strftime('%H:%M:%S')} (через {wait_seconds/3600:.1f} ч.)")
+				print(f"⏰ Следующая проверка истории в {next_run.strftime('%H:%M:%S')} (через {wait_seconds / 3600:.1f} ч.)")
 				await asyncio.sleep(wait_seconds)
 
 				print(f"\n🕒 {datetime.now().strftime('%H:%M:%S')} – Запуск плановой проверки истории")
@@ -384,7 +393,7 @@ class MaxBot:
 				traceback.print_exc()
 				# Небольшая задержка перед повторной попыткой, чтобы не спамить
 				await asyncio.sleep(60)
-	
+
 	async def fetch_and_process_new_messages(self, chat_id: int):
 		"""Получить историю чата, найти новые сообщения и обработать их."""
 		if not self.client or not hasattr(self.client, 'get_chat_history'):
@@ -410,7 +419,7 @@ class MaxBot:
 		if not messages:
 			print("ℹ️ Нет сообщений в истории.")
 			return
-		
+
 		# Определяем путь к файлу истории
 		history_file = self._get_history_file_path(chat_id)
 		file_exists = os.path.exists(history_file)
@@ -460,7 +469,7 @@ class MaxBot:
 		# Сохраняем все ID (и старые, и новые)
 		self._save_message_ids(chat_id, saved_ids)
 		print(f"✅ История обновлена, сохранено {len(saved_ids)} ID.")
-	
+
 	def _get_history_file_path(self, chat_id: int) -> str:
 		"""Вернуть имя файла для указанного чата."""
 		return f"history_{chat_id}.json"
@@ -500,89 +509,89 @@ class MaxBot:
 			print(f"✅ Переслано в Max: {text}")
 		else:
 			print(f"❌ Ошибка пересылки в Max")
-	
+
 	def setup_signal_handlers(self):
 		"""Установить обработчики сигналов для graceful shutdown."""
-		
+
 		def signal_handler(signum, frame):
 			print(f"\n🛑 Получен сигнал {signal.Signals(signum).name}")
 			asyncio.create_task(self.shutdown())
-		
+
 		signal.signal(signal.SIGINT, signal_handler)
 		signal.signal(signal.SIGTERM, signal_handler)
-	
+
 	async def shutdown(self):
 		"""Graceful shutdown."""
 		print("\n⏹️ Инициируем graceful shutdown...")
 		self._shutdown_event.set()
-	
+
 	async def start(self):
 		"""Запустить клиент."""
 		self.setup_signal_handlers()
-		
+
 		if self.client.token:
 			await self._start_with_token()
 		else:
 			await self.client.start()
-	
+
 	async def _start_with_token(self):
 		"""Внутренняя логика для запуска с токеном."""
 		receiver_task = None
 		action_task = None
 		ping_task = None
-	
+
 		try:
 			print("🚀 Инициализация клиента...")
 			await self.client.connect_web_socket()
 			print("✅ WebSocket подключен")
-			
+
 			from webmax import payloads
 			instance = payloads.UserAgent(os_version='Windows', device_name='Opera')
 			self.client.user_agent = instance.to_dict()
 			print("✅ User-Agent создан")
-			
+
 			receiver_task = asyncio.create_task(
 				self.client.message_receiver(),
 				name='MessageReceiver'
 			)
 			self._tasks.append(receiver_task)
-		
+
 			await asyncio.wait_for(
 				self.client.init(device_id=self.client.device_id),
 				timeout=self.timeout
 			)
 			print("✅ Init успешен")
-		
+
 			await asyncio.wait_for(
 				self.client.login(token=self.client.token),
 				timeout=self.timeout
 			)
 			print(f"✅ Авторизация успешна")
-		
+
 			action_task = asyncio.create_task(
 				self.client.action_handler(),
 				name='ActionHandler'
 			)
 			self._tasks.append(action_task)
-		
+
 			ping_task = asyncio.create_task(
 				self.client.ping_loop(),
 				name='PingLoop'
 			)
 			self._tasks.append(ping_task)
-			
+
 			history_task = asyncio.create_task(self._history_scheduler(), name='HistoryScheduler')
 			self._tasks.append(history_task)
-		
+
 			if self.client.on_start_handler:
 				if asyncio.iscoroutinefunction(self.client.on_start_handler):
 					await self.client.on_start_handler()
 				else:
 					self.client.on_start_handler()
-		
+
 			print("✅ Запущен")
 			print("💡 Нажмите Ctrl+C для остановки\n")
-			
+
 			# Ожидаем сигнал shutdown или завершение задач
 			shutdown_task = asyncio.create_task(self._shutdown_event.wait())
 
@@ -590,10 +599,10 @@ class MaxBot:
 				self._tasks + [shutdown_task],
 				return_when=asyncio.FIRST_COMPLETED
 			)
-		
+
 			if shutdown_task in done:
 				print("⏹️ Получен сигнал shutdown")
-	
+
 		except asyncio.TimeoutError:
 			print(f"⏱️ Таймаут подключения (>{self.timeout}с)")
 		except KeyboardInterrupt:
@@ -604,7 +613,7 @@ class MaxBot:
 			traceback.print_exc()
 		finally:
 			await self._cleanup()
-		
+
 	async def _cleanup(self):
 		"""Очистка ресурсов при выходе."""
 		print("\n🧹 Выполняем очистку...")
@@ -613,25 +622,25 @@ class MaxBot:
 		for task in self._tasks:
 			if not task.done():
 				task.cancel()
-		
+
 		if self._tasks:
 			await asyncio.gather(*self._tasks, return_exceptions=True)
 
 			self._tasks.clear()
-		
+
 		if self.client.websocket:
 			try:
 				await self.client.websocket.close()
 				print("✅ WebSocket закрыт")
 			except Exception as e:
 				print(f"⚠️ Ошибка при закрытии WebSocket: {e}")
-		
+
 		if self.notifier:
 			await self.notifier.close()
 
 		if self.telegram_receiver:
 			await self.telegram_receiver.stop()
-		
+
 		print("✅ Очистка завершена")
 
 	async def _restart(self):
