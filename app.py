@@ -253,7 +253,7 @@ class MaxBot:
 			print(formatted_message)
 
 			message_to_send = f"""
-<strong>⚠️⚠️⚠️ ВНИМАНИЕ! СООБЩЕНИЕ ИЗ MAX! ⚠️⚠️⚠️</strong>
+<strong>⚠️⚠️⚠️ ВНИМАНИЕ! СООБЩЕНИЕ ИЗ MAX!</strong>
 
 🆕 [{timestamp}] <strong>{sender}</strong> <i>{prefix}</i>{f":\n{text}" if text else ""}
 """
@@ -320,6 +320,8 @@ class MaxBot:
 							self.notifier.send(target_chat, message_to_send),
 							timeout=self.timeout
 						)
+
+					await self._mark_message_processed(message)
 				except asyncio.TimeoutError:
 					print(f"⏱️ Таймаут при отправке в Telegram (>{self.timeout}с)")
 				except Exception as e:
@@ -328,6 +330,16 @@ class MaxBot:
 			print(f"❌ Ошибка в обработчике сообщений: {e}")
 			import traceback
 			traceback.print_exc()
+
+	async def _mark_message_processed(self, message: Message):
+		"""Пометить сообщение как обработанное (сохранить ID в файл)"""
+		chat_id = message.chat_id
+
+		saved_ids = self._load_saved_message_ids(chat_id)
+		if message.id not in saved_ids:
+			saved_ids.add(message.id)
+			self._save_message_ids(chat_id, saved_ids)
+			print(f"💾 Сохранён ID сообщения {message.id} для чата {chat_id}")
 
 	async def send_to_max(self, chat_id: int, text: str) -> bool:
 		"""
@@ -465,10 +477,6 @@ class MaxBot:
 			await self.process_message(msg)
 
 		print(f"✅ Обработано {len(new_messages)} новых сообщений.")
-
-		# Сохраняем все ID (и старые, и новые)
-		self._save_message_ids(chat_id, saved_ids)
-		print(f"✅ История обновлена, сохранено {len(saved_ids)} ID.")
 
 	def _get_history_file_path(self, chat_id: int) -> str:
 		"""Вернуть имя файла для указанного чата."""
