@@ -8,11 +8,30 @@ import signal
 from collections import deque
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from webmax import WebMaxClient
+
+from webmax import WebMaxClient, payloads
 from webmax.entities import Message
 from notification_service import TelegramNotificationService
 from telegram_receiver import TelegramReceiver
 from webmax.errors import NeedRestartError
+
+import traceback
+
+from logger import setup_logging, get_logger, LogLevel
+
+setup_logging(level=LogLevel.INFO, log_file="bot.log")
+
+logger = get_logger(__name__)
+
+def log(message: str, level: LogLevel = LogLevel.INFO):
+	if level == LogLevel.DEBUG:
+		logger.debug(message)
+	elif level == LogLevel.INFO:
+		logger.info(message)
+	elif level == LogLevel.WARNING:
+		logger.warning(message)
+	elif level == LogLevel.ERROR:
+		logger.error(message)
 
 load_dotenv()
 
@@ -120,11 +139,11 @@ class MaxBot:
 					)
 					recv_task = asyncio.create_task(self.telegram_receiver.run())
 					self._tasks.append(recv_task)
-					print("✅ Telegram -> Max пересылка активирована")
-			print(f"✅ Telegram-бот настроен")
+					log("✅ Telegram -> Max пересылка активирована")
+			log(f"✅ Telegram-бот настроен")
 		else:
 			self.notifier = None
-			print("⚠️ Telegram-бот не настроен — уведомления отключены")
+			log("⚠️ Telegram-бот не настроен — уведомления отключены", LogLevel.WARNING)
 
 		self.setup_handlers()
 
@@ -172,7 +191,7 @@ class MaxBot:
 							attachments['file_type'] = 'video'
 							attachments['file_name'] = f"video_{video_id}.mp4"
 						except Exception as e:
-							print(f"⚠️ Не удалось получить ссылку на видео: {e}")
+							log(f"❌ Не удалось получить ссылку на видео: {e}", LogLevel.ERROR)
 
 				elif attach_type == 'FILE':
 					file_id = attach.get('fileId')
@@ -187,9 +206,9 @@ class MaxBot:
 								attachments['file_type'] = 'document'
 								attachments['file_name'] = name
 							else:
-								print(f"⚠️ Не удалось получить URL для файла {name}")
+								log(f"⚠️ Не удалось получить URL для файла {name}", LogLevel.WARNING)
 						except Exception as e:
-							print(f"⚠️ Ошибка получения URL файла: {e}")
+							log(f"❌ Ошибка получения URL файла: {e}", LogLevel.ERROR)
 
 				elif attach_type == 'AUDIO':
 					if 'baseUrl' in attach:
@@ -204,7 +223,7 @@ class MaxBot:
 
 		@self.client.on_start()
 		async def on_start():
-			print(f"✅ Авторизован как {self.client.me.firstname} {self.client.me.lastname}")
+			log(f"✅ Авторизован как {self.client.me.firstname} {self.client.me.lastname}")
 
 		@self.client.on_message()
 		async def handle_new_message(message: Message):
@@ -217,12 +236,12 @@ class MaxBot:
 			if self.group_chat_id is None and message.chat and self.group_name:
 				if self.group_name.lower() in (message.chat.title or "").lower():
 					self.group_chat_id = str(message.chat_id)
-					print(f"✅ Определён ID группы: {self.group_chat_id}")
+					log(f"✅ Определён ID группы: {self.group_chat_id}")
 
-			# Проверка на флуд (опционально, можно отключить для истории)
+			# Проверка на флуд
 			is_flood, reason = await self.flood_protection.check_flood(str(message.chat_id))
 			if is_flood:
-				print(reason)
+				log(reason, LogLevel.WARNING)
 				return
 
 			timestamp = time.strftime('%H:%M:%S', time.localtime(message.time // 1000)) if message.time else "N/A"
@@ -250,7 +269,7 @@ class MaxBot:
 			if text:
 				formatted_message += f" {text}"
 
-			print(formatted_message)
+			log(formatted_message)
 
 			message_to_send = f"""
 <strong>⚠️⚠️⚠️ ВНИМАНИЕ! СООБЩЕНИЕ ИЗ MAX!</strong>
@@ -264,7 +283,7 @@ class MaxBot:
 									str(message.chat_id) == self.group_chat_id)
 				target_chat = self.telegram_group_chat_id if is_group_message else self.telegram_user_chat_id
 				if not target_chat:
-					print("⚠️ Не задан Telegram chat ID")
+					log("⚠️ Не задан Telegram chat ID", LogLevel.WARNING)
 					return
 
 				try:
@@ -323,12 +342,11 @@ class MaxBot:
 
 					await self._mark_message_processed(message)
 				except asyncio.TimeoutError:
-					print(f"⏱️ Таймаут при отправке в Telegram (>{self.timeout}с)")
+					log(f"⏱️ Таймаут при отправке в Telegram (>{self.timeout}с)", LogLevel.ERROR)
 				except Exception as e:
-					print(f"❌ Ошибка при отправке в Telegram: {e}")
+					log(f"❌ Ошибка при отправке в Telegram: {e}", LogLevel.ERROR)
 		except Exception as e:
-			print(f"❌ Ошибка в обработчике сообщений: {e}")
-			import traceback
+			log(f"❌ Ошибка в обработчике сообщений: {e}", LogLevel.ERROR)
 			traceback.print_exc()
 
 	async def _mark_message_processed(self, message: Message):
@@ -339,7 +357,7 @@ class MaxBot:
 		if message.id not in saved_ids:
 			saved_ids.add(message.id)
 			self._save_message_ids(chat_id, saved_ids)
-			print(f"💾 Сохранён ID сообщения {message.id} для чата {chat_id}")
+			log(f"💾 Сохранён ID сообщения {message.id} для чата {chat_id}")
 
 	async def send_to_max(self, chat_id: int, text: str) -> bool:
 		"""
@@ -365,13 +383,13 @@ class MaxBot:
 			)
 			return message is not None
 		except Exception as e:
-			print(f"❌ Ошибка отправки в Max: {e}")
+			log(f"❌ Ошибка отправки в Max: {e}", LogLevel.ERROR)
 			return False
 
 	async def _history_scheduler(self):
 		"""Планировщик: запускает получение истории в 11:00, 18:00, 20:00."""
 		if not self.history_chat_id:
-			print("⚠️ Не задан history_chat_id, планировщик истории не запущен.")
+			log("⚠️ Не задан history_chat_id, планировщик истории не запущен.", LogLevel.WARNING)
 			return
 
 		env_value = os.getenv('HISTORY_SCHEDULE_TIMES', '11:0,18:0,20:0')
@@ -394,14 +412,13 @@ class MaxBot:
 					next_run = (now + timedelta(days=1)).replace(hour=first[0], minute=first[1], second=0, microsecond=0)
 
 				wait_seconds = (next_run - now).total_seconds()
-				print(f"⏰ Следующая проверка истории в {next_run.strftime('%H:%M:%S')} (через {wait_seconds / 3600:.1f} ч.)")
+				log(f"⏰ Следующая проверка истории в {next_run.strftime('%H:%M:%S')} (через {wait_seconds / 3600:.1f} ч.)")
 				await asyncio.sleep(wait_seconds)
 
-				print(f"\n🕒 {datetime.now().strftime('%H:%M:%S')} – Запуск плановой проверки истории")
+				log(f"🕒 {datetime.now().strftime('%H:%M:%S')} – Запуск плановой проверки истории")
 				await self.fetch_and_process_new_messages(self.history_chat_id)
 			except Exception as e:
-				print(f"❌ Ошибка в планировщике истории: {e}")
-				import traceback
+				log(f"❌ Ошибка в планировщике истории: {e}", LogLevel.ERROR)
 				traceback.print_exc()
 				# Небольшая задержка перед повторной попыткой, чтобы не спамить
 				await asyncio.sleep(60)
@@ -409,10 +426,10 @@ class MaxBot:
 	async def fetch_and_process_new_messages(self, chat_id: int):
 		"""Получить историю чата, найти новые сообщения и обработать их."""
 		if not self.client or not hasattr(self.client, 'get_chat_history'):
-			print("⚠️ Метод get_chat_history недоступен. Обновите библиотеку webmax.")
+			log("⚠️ Метод get_chat_history недоступен. Обновите библиотеку webmax.", LogLevel.WARNING)
 			return
 
-		print(f"📥 Запрашиваем историю чата {chat_id}...")
+		log(f"📥 Запрашиваем историю чата {chat_id}...")
 		try:
 			messages = await self.client.get_chat_history(
 				chat_id,
@@ -421,15 +438,15 @@ class MaxBot:
 				forward=0
 			)
 		except ConnectionError as e:
-			print(f"❌ Потеряно соединение: {e}. Перезапуск клиента через 10 секунд...")
+			log(f"❌ Потеряно соединение: {e}. Перезапуск клиента через 10 секунд...", LogLevel.ERROR)
 			asyncio.create_task(self._restart())
 			return
 		except Exception as e:
-			print(f"❌ Ошибка получения истории: {e}")
+			log(f"❌ Ошибка получения истории: {e}", LogLevel.ERROR)
 			return
 
 		if not messages:
-			print("ℹ️ Нет сообщений в истории.")
+			log("ℹ️ Нет сообщений в истории.")
 			return
 
 		# Определяем путь к файлу истории
@@ -440,7 +457,7 @@ class MaxBot:
 		if not file_exists:
 			all_ids = {msg.id for msg in messages}
 			self._save_message_ids(chat_id, all_ids)
-			print(f"💾 Первый запуск для чата {chat_id}: сохранено {len(all_ids)} ID. Сообщения не обрабатывались.")
+			log(f"💾 Первый запуск для чата {chat_id}: сохранено {len(all_ids)} ID. Сообщения не обрабатывались.")
 			return
 
 		# Загружаем сохранённые ID
@@ -449,13 +466,13 @@ class MaxBot:
 		new_message_ids = all_message_ids - saved_ids
 
 		if not new_message_ids:
-			print("ℹ️ Новых сообщений в истории не обнаружено.")
+			log("ℹ️ Новых сообщений в истории не обнаружено.")
 			# Обновляем сохранённые ID, если появились новые (например, вручную удалили из файла)
 			if all_message_ids != saved_ids:
 				self._save_message_ids(chat_id, all_message_ids)
 			return
 
-		print(f"✨ Найдено {len(new_message_ids)} новых сообщений.")
+		log(f"✨ Найдено {len(new_message_ids)} новых сообщений.")
 
 		new_messages = []
 		duplicate_counter = 0
@@ -476,7 +493,7 @@ class MaxBot:
 		for msg in new_messages:
 			await self.process_message(msg)
 
-		print(f"✅ Обработано {len(new_messages)} новых сообщений.")
+		log(f"✅ Обработано {len(new_messages)} новых сообщений.")
 
 	def _get_history_file_path(self, chat_id: int) -> str:
 		"""Вернуть имя файла для указанного чата."""
@@ -505,7 +522,7 @@ class MaxBot:
 	async def _on_telegram_message(self, text: str):
 		"""Колбэк, вызываемый при получении сообщения из Telegram."""
 		if not self.max_target_chat_id:
-			print("⚠️ Не задан MAX_TARGET_CHAT_ID, сообщение не отправлено")
+			log("⚠️ Не задан MAX_TARGET_CHAT_ID, сообщение не отправлено", LogLevel.WARNING)
 			return
 
 		# Отправляем в Max
@@ -513,16 +530,17 @@ class MaxBot:
 			chat_id=self.max_target_chat_id,
 			text=text
 		)
+
 		if success:
-			print(f"✅ Переслано в Max: {text}")
+			log(f"✅ Переслано в Max: {text}")
 		else:
-			print(f"❌ Ошибка пересылки в Max")
+			log(f"❌ Ошибка пересылки в Max")
 
 	def setup_signal_handlers(self):
 		"""Установить обработчики сигналов для graceful shutdown."""
 
 		def signal_handler(signum, frame):
-			print(f"\n🛑 Получен сигнал {signal.Signals(signum).name}")
+			log(f"🛑 Получен сигнал {signal.Signals(signum).name}")
 			asyncio.create_task(self.shutdown())
 
 		signal.signal(signal.SIGINT, signal_handler)
@@ -530,7 +548,7 @@ class MaxBot:
 
 	async def shutdown(self):
 		"""Graceful shutdown."""
-		print("\n⏹️ Инициируем graceful shutdown...")
+		log("⏹️ Инициируем graceful shutdown...")
 		self._shutdown_event.set()
 
 	async def start(self):
@@ -549,14 +567,13 @@ class MaxBot:
 		ping_task = None
 
 		try:
-			print("🚀 Инициализация клиента...")
+			log("🚀 Инициализация клиента...")
 			await self.client.connect_web_socket()
-			print("✅ WebSocket подключен")
+			log("✅ WebSocket подключен")
 
-			from webmax import payloads
 			instance = payloads.UserAgent(os_version='Windows', device_name='Opera')
 			self.client.user_agent = instance.to_dict()
-			print("✅ User-Agent создан")
+			log("✅ User-Agent создан")
 
 			receiver_task = asyncio.create_task(
 				self.client.message_receiver(),
@@ -568,13 +585,13 @@ class MaxBot:
 				self.client.init(device_id=self.client.device_id),
 				timeout=self.timeout
 			)
-			print("✅ Init успешен")
+			log("✅ Init успешен")
 
 			await asyncio.wait_for(
 				self.client.login(token=self.client.token),
 				timeout=self.timeout
 			)
-			print(f"✅ Авторизация успешна")
+			log(f"✅ Авторизация успешна")
 
 			action_task = asyncio.create_task(
 				self.client.action_handler(),
@@ -597,8 +614,8 @@ class MaxBot:
 				else:
 					self.client.on_start_handler()
 
-			print("✅ Запущен")
-			print("💡 Нажмите Ctrl+C для остановки\n")
+			log("✅ Запущен")
+			log("💡 Нажмите Ctrl+C для остановки")
 
 			# Ожидаем сигнал shutdown или завершение задач
 			shutdown_task = asyncio.create_task(self._shutdown_event.wait())
@@ -609,14 +626,14 @@ class MaxBot:
 			)
 
 			if shutdown_task in done:
-				print("⏹️ Получен сигнал shutdown")
+				log("⏹️ Получен сигнал shutdown")
 
 		except asyncio.TimeoutError:
-			print(f"⏱️ Таймаут подключения (>{self.timeout}с)")
+			log(f"⏱️ Таймаут подключения (>{self.timeout}с)", LogLevel.ERROR)
 		except KeyboardInterrupt:
-			print("\n⏹️ Ctrl+C")
+			log("\n⏹️ Ctrl+C", LogLevel.WARNING)
 		except Exception as e:
-			print(f"❌ Ошибка: {e}")
+			log(f"❌ Ошибка: {e}", LogLevel.ERROR)
 			import traceback
 			traceback.print_exc()
 		finally:
@@ -624,9 +641,9 @@ class MaxBot:
 
 	async def _cleanup(self):
 		"""Очистка ресурсов при выходе."""
-		print("\n🧹 Выполняем очистку...")
+		log("🧹 Выполняем очистку...")
 
-		print("⏳ Отмена задач...")
+		log("⏳ Отмена задач...")
 		for task in self._tasks:
 			if not task.done():
 				task.cancel()
@@ -639,9 +656,9 @@ class MaxBot:
 		if self.client.websocket:
 			try:
 				await self.client.websocket.close()
-				print("✅ WebSocket закрыт")
+				log("✅ WebSocket закрыт")
 			except Exception as e:
-				print(f"⚠️ Ошибка при закрытии WebSocket: {e}")
+				log(f"⚠️ Ошибка при закрытии WebSocket: {e}", LogLevel.WARNING)
 
 		if self.notifier:
 			await self.notifier.close()
@@ -649,11 +666,11 @@ class MaxBot:
 		if self.telegram_receiver:
 			await self.telegram_receiver.stop()
 
-		print("✅ Очистка завершена")
+		log("✅ Очистка завершена")
 
 	async def _restart(self):
 		"""Перезапуск клиента: закрываем всё и запускаем заново."""
-		print("🔄 Перезапуск клиента...")
+		log("🔄 Перезапуск клиента...")
 
 		await self._cleanup()
 
@@ -665,7 +682,7 @@ async def main():
 
 	def signal_handler(signum, frame):
 		nonlocal manual_shutdown
-		print(f"\n🛑 Получен сигнал {signal.Signals(signum).name}")
+		log(f"🛑 Получен сигнал {signal.Signals(signum).name}", LogLevel.WARNING)
 		manual_shutdown = True
 
 	signal.signal(signal.SIGINT, signal_handler)
@@ -695,25 +712,25 @@ async def main():
 		try:
 			await bot.start()
 		except NeedRestartError:
-			print("🔄 Перезапуск из-за потери соединения...")
+			log("🔄 Перезапуск из-за потери соединения...", LogLevel.ERROR)
 			await asyncio.sleep(5)
 			continue
 		except KeyboardInterrupt:
-			print("\n👋 Завершение по запросу пользователя")
+			log("👋 Завершение по запросу пользователя", LogLevel.WARNING)
 			manual_shutdown = True
 			break
 		except Exception as e:
-			print(f"❌ Необработанная ошибка: {e}")
+			log(f"❌ Необработанная ошибка: {e}", LogLevel.ERROR)
 			await asyncio.sleep(5)
 			continue
 
 		# Если бот завершился без исключения (например, по внутреннему shutdown), тоже перезапустим
 		if not manual_shutdown:
-			print("🔄 Бот остановлен")
+			log("🔄 Бот остановлен")
 			sys.exit(0)
 
 if __name__ == "__main__":
 	try:
 		asyncio.run(main())
 	except KeyboardInterrupt:
-		print("\n✅ Программа завершена")
+		log("\n✅ Программа завершена")

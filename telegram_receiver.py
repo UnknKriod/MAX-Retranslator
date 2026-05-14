@@ -1,8 +1,13 @@
 import time
 import json
+
 import aiohttp
 import asyncio
-from typing import List, Optional
+from aiohttp_socks import ProxyConnector
+
+from typing import List
+import traceback
+from logger import get_logger, LogLevel
 
 class TelegramReceiver:
     def __init__(self, bot_token: str, source_chat_ids: List[str],
@@ -18,16 +23,28 @@ class TelegramReceiver:
         self.names_map_file = names_map_file
         self.names_map = self._load_names_map()
 
+        self.logger = get_logger(__name__)
+
+    def _log(self, message: str, level: LogLevel = LogLevel.INFO):
+        if level == LogLevel.DEBUG:
+            self.logger.debug(message)
+        elif level == LogLevel.INFO:
+            self.logger.info(message)
+        elif level == LogLevel.WARNING:
+            self.logger.warning(message)
+        elif level == LogLevel.ERROR:
+            self.logger.error(message)
+
     def _load_names_map(self) -> dict:
         """Загрузить маппинг ID -> кастомное имя из JSON файла."""
         try:
             with open(self.names_map_file, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except FileNotFoundError:
-            print(f"⚠️ Файл {self.names_map_file} не найден, создаю пустой.")
+            self._log(f"⚠️ Файл {self.names_map_file} не найден, создаю пустой.", LogLevel.WARNING)
             return {}
         except json.JSONDecodeError:
-            print(f"❌ Ошибка в JSON файле {self.names_map_file}.")
+            self._log(f"❌ Ошибка в JSON файле {self.names_map_file}.", LogLevel.ERROR)
             return {}
 
     def _get_sender_name(self, from_data: dict) -> str:
@@ -47,11 +64,10 @@ class TelegramReceiver:
         if self._session is None:
             if self.proxy_url and self.proxy_url.startswith('socks5'):
                 try:
-                    from aiohttp_socks import ProxyConnector
                     connector = ProxyConnector.from_url(self.proxy_url)
                     self._session = aiohttp.ClientSession(connector=connector)
                 except ImportError:
-                    print("⚠️ aiohttp_socks не установлена, прокси не используется")
+                    self._log("⚠️ aiohttp_socks не установлена, прокси не используется", LogLevel.WARNING)
                     self._session = aiohttp.ClientSession()
             else:
                 self._session = aiohttp.ClientSession()
@@ -71,11 +87,11 @@ class TelegramReceiver:
                     if data.get("ok"):
                         return data.get("result", [])
                     else:
-                        print(f"❌ Ошибка Telegram API: {data}")
+                        self._log(f"❌ Ошибка Telegram API: {data}", LogLevel.ERROR)
                 else:
-                    print(f"❌ HTTP {resp.status} при getUpdates")
+                    self._log(f"❌ HTTP {resp.status} при getUpdates", LogLevel.ERROR)
         except Exception as e:
-            print(f"❌ Ошибка получения обновлений: {e}")
+            self._log(f"❌ Ошибка получения обновлений: {e}", LogLevel.ERROR)
         return []
     
     async def _process_update(self, update):
@@ -109,7 +125,7 @@ class TelegramReceiver:
 
     async def run(self):
         """Основной цикл получения сообщений."""
-        print("📡 Запущен приёмник Telegram (long polling)")
+        self._log("📡 Запущен приёмник Telegram (long polling)")
         while not self._stop_event.is_set():
             try:
                 updates = await self._get_updates()
@@ -118,11 +134,10 @@ class TelegramReceiver:
                     await self._process_update(upd)
                 await asyncio.sleep(1)
             except Exception as e:
-                print(f"❌ Ошибка в приёмнике Telegram: {e}")
-                import traceback
+                self._log(f"❌ Ошибка в приёмнике Telegram: {e}", LogLevel.ERROR)
                 traceback.print_exc()
                 await asyncio.sleep(5)  # пауза перед повторной попыткой
-        print("🛑 Приёмник Telegram остановлен")
+        self._log("🛑 Приёмник Telegram остановлен")
     
     async def stop(self):
         self._stop_event.set()

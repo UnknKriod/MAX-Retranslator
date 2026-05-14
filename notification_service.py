@@ -1,7 +1,11 @@
 import aiohttp
 import io
 from abc import ABC, abstractmethod
-from typing import Optional, List, Union
+from typing import Optional
+from aiohttp_socks import ProxyConnector
+
+from logger import LogLevel, get_logger
+
 
 class NotificationService(ABC):
     """Абстрактный базовый класс для сервисов уведомлений."""
@@ -24,16 +28,27 @@ class TelegramNotificationService(NotificationService):
         self.proxy_url = proxy_url
         self._session = None
 
+        self.logger = get_logger(__name__)
+
+    def _log(self, message: str, level: LogLevel = LogLevel.INFO):
+        if level == LogLevel.DEBUG:
+            self.logger.debug(message)
+        elif level == LogLevel.INFO:
+            self.logger.info(message)
+        elif level == LogLevel.WARNING:
+            self.logger.warning(message)
+        elif level == LogLevel.ERROR:
+            self.logger.error(message)
+
     async def _get_session(self) -> aiohttp.ClientSession:
         """Создать или вернуть существующую сессию с прокси."""
         if self._session is None:
             if self.proxy_url and self.proxy_url.startswith('socks5'):
                 try:
-                    from aiohttp_socks import ProxyConnector
                     connector = ProxyConnector.from_url(self.proxy_url)
                     self._session = aiohttp.ClientSession(connector=connector)
                 except ImportError:
-                    print("❌ Telegram: библиотека aiohttp_socks не установлена. Установите: pip install aiohttp_socks")
+                    self._log("❌ Telegram: библиотека aiohttp_socks не установлена. Установите: pip install aiohttp_socks", LogLevel.ERROR)
                     self._session = aiohttp.ClientSession()
             else:
                 self._session = aiohttp.ClientSession()
@@ -57,18 +72,18 @@ class TelegramNotificationService(NotificationService):
                         if len(data) <= self.MAX_FILE_SIZE:
                             return data
                         else:
-                            print(f"❌ Файл слишком большой: {len(data)} > {self.MAX_FILE_SIZE}")
+                            self._log(f"❌ Файл слишком большой: {len(data)} > {self.MAX_FILE_SIZE}", LogLevel.ERROR)
                             return None
                     else:
                         # Может быть HTML-страница, капча и т.п.
                         text_sample = (await resp.text())[:200]
-                        print(f"❌ Неожиданный Content-Type {content_type}, ответ: {text_sample}")
+                        self._log(f"❌ Неожиданный Content-Type {content_type}, ответ: {text_sample}", LogLevel.ERROR)
                         return None
                 else:
-                    print(f"❌ Ошибка скачивания: HTTP {resp.status}")
+                    self._log(f"❌ Ошибка скачивания: HTTP {resp.status}", LogLevel.ERROR)
                     return None
         except Exception as e:
-            print(f"❌ Ошибка при скачивании: {e}")
+            self._log(f"❌ Ошибка при скачивании: {e}", LogLevel.ERROR)
             return None
 
     async def download_telegram_file(self, file_id: str) -> Optional[bytes]:
@@ -78,11 +93,11 @@ class TelegramNotificationService(NotificationService):
         async with await self._get_session() as session:
             async with session.post(get_file_url, json={"file_id": file_id}) as resp:
                 if resp.status != 200:
-                    print(f"❌ Не удалось получить file_path: {await resp.text()}")
+                    self._log(f"❌ Не удалось получить file_path: {await resp.text()}", LogLevel.ERROR)
                     return None
                 result = await resp.json()
                 if not result.get("ok"):
-                    print(f"❌ Ошибка getFile: {result}")
+                    self._log(f"❌ Ошибка getFile: {result}", LogLevel.ERROR)
                     return None
                 file_path = result["result"]["file_path"]
 
@@ -95,10 +110,10 @@ class TelegramNotificationService(NotificationService):
                     if len(data) <= self.MAX_FILE_SIZE:
                         return data
                     else:
-                        print(f"❌ Файл слишком велик: {len(data)} > {self.MAX_FILE_SIZE}")
+                        self._log(f"❌ Файл слишком велик: {len(data)} > {self.MAX_FILE_SIZE}", LogLevel.ERROR)
                         return None
                 else:
-                    print(f"❌ Ошибка скачивания файла: HTTP {resp.status}")
+                    self._log(f"❌ Ошибка скачивания файла: HTTP {resp.status}", LogLevel.ERROR)
                     return None
 
     async def send(self, chat_id: str, text: str,
@@ -121,7 +136,7 @@ class TelegramNotificationService(NotificationService):
             bool: True если успешно, False если ошибка
         """
         if not chat_id:
-            print("❌ Telegram: не указан chat_id")
+            self._log("❌ Telegram: не указан chat_id", LogLevel.ERROR)
             return False
 
         session = await self._get_session()
@@ -144,7 +159,7 @@ class TelegramNotificationService(NotificationService):
                 return await self._send_text(session, chat_id, text)
 
         except Exception as e:
-            print(f"❌ Telegram: исключение при отправке - {e}")
+            self._log(f"❌ Telegram: исключение при отправке - {e}", LogLevel.ERROR)
             return False
 
     async def _send_text(self, session: aiohttp.ClientSession, chat_id: str, text: str) -> bool:
@@ -159,14 +174,14 @@ class TelegramNotificationService(NotificationService):
         try:
             async with session.post(endpoint, json=payload) as resp:
                 if resp.status == 200:
-                    print(f"✅ Telegram: текст отправлен в чат {chat_id}")
+                    self._log(f"✅ Telegram: текст отправлен в чат {chat_id}")
                     return True
                 else:
                     error_text = await resp.text()
-                    print(f"❌ Telegram: ошибка {resp.status} - {error_text}")
+                    self._log(f"❌ Telegram: ошибка {resp.status} - {error_text}", LogLevel.ERROR)
                     return False
         except Exception as e:
-            print(f"❌ Telegram: ошибка при отправке текста - {e}")
+            self._log(f"❌ Telegram: ошибка при отправке текста - {e}", LogLevel.ERROR)
             return False
 
     async def _send_photo(self, session: aiohttp.ClientSession, chat_id: str,
@@ -184,14 +199,14 @@ class TelegramNotificationService(NotificationService):
         try:
             async with session.post(endpoint, json=payload) as resp:
                 if resp.status == 200:
-                    print(f"✅ Telegram: фото отправлено в чат {chat_id}")
+                    self._log(f"✅ Telegram: фото отправлено в чат {chat_id}")
                     return True
                 else:
                     error_text = await resp.text()
-                    print(f"❌ Telegram: ошибка {resp.status} - {error_text}")
+                    self._log(f"❌ Telegram: ошибка {resp.status} - {error_text}", LogLevel.ERROR)
                     return False
         except Exception as e:
-            print(f"❌ Telegram: ошибка при отправке фото - {e}")
+            self._log(f"❌ Telegram: ошибка при отправке фото - {e}", LogLevel.ERROR)
             return False
 
     async def _send_video(self, session: aiohttp.ClientSession, chat_id: str,
@@ -209,14 +224,14 @@ class TelegramNotificationService(NotificationService):
         try:
             async with session.post(endpoint, json=payload) as resp:
                 if resp.status == 200:
-                    print(f"✅ Telegram: видео отправлено в чат {chat_id}")
+                    self._log(f"✅ Telegram: видео отправлено в чат {chat_id}")
                     return True
                 else:
                     error_text = await resp.text()
-                    print(f"❌ Telegram: ошибка {resp.status} - {error_text}")
+                    self._log(f"❌ Telegram: ошибка {resp.status} - {error_text}", LogLevel.ERROR)
                     return False
         except Exception as e:
-            print(f"❌ Telegram: ошибка при отправке видео - {e}")
+            self._log(f"❌ Telegram: ошибка при отправке видео - {e}", LogLevel.ERROR)
             return False
 
     async def _send_document(self, session: aiohttp.ClientSession, chat_id: str,
@@ -234,14 +249,14 @@ class TelegramNotificationService(NotificationService):
         try:
             async with session.post(endpoint, json=payload) as resp:
                 if resp.status == 200:
-                    print(f"✅ Telegram: документ отправлен в чат {chat_id}")
+                    self._log(f"✅ Telegram: документ отправлен в чат {chat_id}")
                     return True
                 else:
                     error_text = await resp.text()
-                    print(f"❌ Telegram: ошибка {resp.status} - {error_text}")
+                    self._log(f"❌ Telegram: ошибка {resp.status} - {error_text}", LogLevel.ERROR)
                     return False
         except Exception as e:
-            print(f"❌ Telegram: ошибка при отправке документа - {e}")
+            self._log(f"❌ Telegram: ошибка при отправке документа - {e}", LogLevel.ERROR)
             return False
 
     async def send_file_from_bytes(self, chat_id: str, file_bytes: bytes,
@@ -261,12 +276,12 @@ class TelegramNotificationService(NotificationService):
             bool: True если успешно, False если ошибка
         """
         if not chat_id:
-            print("❌ Telegram: не указан chat_id")
+            self._log("❌ Telegram: не указан chat_id", LogLevel.ERROR)
             return False
 
         # Проверить размер файла
         if len(file_bytes) > self.MAX_FILE_SIZE:
-            print(f"❌ Telegram: файл слишком большой ({len(file_bytes)} байт, макс {self.MAX_FILE_SIZE})")
+            self._log(f"❌ Telegram: файл слишком большой ({len(file_bytes)} байт, макс {self.MAX_FILE_SIZE})", LogLevel.ERROR)
             return False
 
         session = await self._get_session()
@@ -296,15 +311,15 @@ class TelegramNotificationService(NotificationService):
 
             async with session.post(endpoint, data=data) as resp:
                 if resp.status == 200:
-                    print(f"✅ Telegram: файл '{file_name}' отправлен в чат {chat_id}")
+                    self._log(f"✅ Telegram: файл '{file_name}' отправлен в чат {chat_id}")
                     return True
                 else:
                     error_text = await resp.text()
-                    print(f"❌ Telegram: ошибка {resp.status} - {error_text}")
+                    self._log(f"❌ Telegram: ошибка {resp.status} - {error_text}", LogLevel.ERROR)
                     return False
 
         except Exception as e:
-            print(f"❌ Telegram: ошибка при отправке файла - {e}")
+            self._log(f"❌ Telegram: ошибка при отправке файла - {e}", LogLevel.ERROR)
             return False
 
     async def close(self):
